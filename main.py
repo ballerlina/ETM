@@ -16,6 +16,7 @@ import scipy.io
 
 from torch import nn, optim
 from torch.nn import functional as F
+from gensim.models import KeyedVectors
 
 from etm import ETM
 from utils import nearest_neighbors, get_topic_coherence, get_topic_diversity
@@ -28,6 +29,7 @@ parser.add_argument('--data_path', type=str, default='data/20ng', help='director
 parser.add_argument('--emb_path', type=str, default='data/20ng_embeddings.txt', help='directory containing word embeddings')
 parser.add_argument('--save_path', type=str, default='./results', help='path to save results')
 parser.add_argument('--batch_size', type=int, default=1000, help='input batch size for training')
+parser.add_argument('--emb_gensim', type=int, default=0, help='was emb saved as a KeyedVectors?')
 
 ### model-related arguments
 parser.add_argument('--num_topics', type=int, default=50, help='number of topics')
@@ -99,16 +101,20 @@ args.num_docs_test_2 = len(test_2_tokens)
 
 embeddings = None
 if not args.train_embeddings:
+    print('Loading embeddings...')
     emb_path = args.emb_path
     vect_path = os.path.join(args.data_path.split('/')[0], 'embeddings.pkl')   
-    vectors = {}
-    with open(emb_path, 'rb') as f:
-        for l in f:
-            line = l.decode().split()
-            word = line[0]
-            if word in vocab:
-                vect = np.array(line[1:]).astype(np.float)
-                vectors[word] = vect
+    if args.emb_gensim:
+        vectors = KeyedVectors.load(args.emb_path)
+    else:
+        vectors = {}
+        with open(emb_path, 'rb') as f:
+            for l in f:
+                line = l.decode().split()
+                word = line[0]
+                if word in vocab:
+                    vect = np.array(line[1:]).astype(np.float)
+                    vectors[word] = vect
     embeddings = np.zeros((vocab_size, args.emb_size))
     words_found = 0
     for i, word in enumerate(vocab):
