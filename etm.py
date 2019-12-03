@@ -3,17 +3,20 @@ import torch.nn.functional as F
 import numpy as np 
 import math 
 
+import torch
 from torch import nn
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ETM(nn.Module):
     def __init__(self, num_topics, vocab_size, t_hidden_size, rho_size, emsize, 
-                    theta_act, embeddings=None, train_embeddings=True, enc_drop=0.5):
+                    theta_act, embeddings=None, train_embeddings=True, enc_drop=0.5,
+                    fixed_topics=None):
         super(ETM, self).__init__()
 
         ## define hyperparameters
         self.num_topics = num_topics
+        self.num_fixed_topics = 0 if fixed_topics is None else len(fixed_topics)
         self.vocab_size = vocab_size
         self.t_hidden_size = t_hidden_size
         self.rho_size = rho_size
@@ -32,8 +35,13 @@ class ETM(nn.Module):
             self.rho = embeddings.clone().float().to(device)
 
         ## define the matrix containing the topic embeddings
-        self.alphas = nn.Linear(rho_size, num_topics, bias=False)#nn.Parameter(torch.randn(rho_size, num_topics))
-    
+        self.alphas = nn.Linear(rho_size, num_topics - self.num_fixed_topics, bias=False)#nn.Parameter(torch.randn(rho_size, num_topics))
+
+        if self.num_fixed_topics > 0:
+            self.alphas_fixed = nn.Linear(rho_size, self.num_fixed_topics, bias=False)
+            for i, vector in enumerate(fixed_topics):
+                self.alphas_fixed.weight.data[i, :] = torch.as_tensor(vector)
+
         ## define variational distribution for \theta_{1:D} via amortizartion
         self.q_theta = nn.Sequential(
                 nn.Linear(vocab_size, t_hidden_size), 
@@ -92,10 +100,13 @@ class ETM(nn.Module):
         return mu_theta, logsigma_theta, kl_theta
 
     def get_beta(self):
+        alphas = self.alphas.weight if self.num_fixed_topics == 0 \
+            else torch.cat([self.alphas.weight, self.alphas_fixed.weight.detach()])
+        alphas = alphas.transpose(1, 0)
         try:
-            logit = self.alphas(self.rho.weight) # torch.mm(self.rho, self.alphas)
+            logit = torch.mm(self.rho.weight, alphas)
         except:
-            logit = self.alphas(self.rho)
+            logit = torch.mm(self.rho, alphas)
         beta = F.softmax(logit, dim=0).transpose(1, 0) ## softmax over vocab dimension
         return beta
 

@@ -38,6 +38,7 @@ parser.add_argument('--emb_size', type=int, default=300, help='dimension of embe
 parser.add_argument('--t_hidden_size', type=int, default=800, help='dimension of hidden space of q(theta)')
 parser.add_argument('--theta_act', type=str, default='relu', help='tanh, softplus, relu, rrelu, leakyrelu, elu, selu, glu)')
 parser.add_argument('--train_embeddings', type=int, default=0, help='whether to fix rho or train it')
+parser.add_argument('--fixed_topics', type=str, default=None, help='comma-separated list of words to fix as topic embs')
 
 ### optimization-related arguments
 parser.add_argument('--lr', type=float, default=0.005, help='learning rate')
@@ -126,6 +127,18 @@ if not args.train_embeddings:
     embeddings = torch.from_numpy(embeddings).to(device)
     args.embeddings_dim = embeddings.size()
 
+if args.fixed_topics is not None:
+    if args.train_embeddings:
+        print("We can't have fixed_topics while training embeddings")
+        exit(1)
+    fixed_topics = [vectors[word] for word in args.fixed_topics.split(',')]
+
+    if len(fixed_topics) > args.num_topics:
+        print('Number of fixed topics larger than total number of topics')
+        exit(1)
+else:
+    fixed_topics = None
+
 print('=*'*100)
 print('Training an Embedded Topic Model on {} with the following settings: {}'.format(args.dataset.upper(), args))
 print('=*'*100)
@@ -144,7 +157,7 @@ else:
 
 ## define model and optimizer
 model = ETM(args.num_topics, vocab_size, args.t_hidden_size, args.rho_size, args.emb_size, 
-                args.theta_act, embeddings, args.train_embeddings, args.enc_drop).to(device)
+                args.theta_act, embeddings, args.train_embeddings, args.enc_drop, fixed_topics).to(device)
 
 print('model: {}'.format(model))
 
@@ -206,7 +219,7 @@ def train(epoch):
             epoch, optimizer.param_groups[0]['lr'], cur_kl_theta, cur_loss, cur_real_loss))
     print('*'*100)
 
-def visualize(m, show_emb=True):
+def visualize(m, show_emb=False):
     if not os.path.exists('./results'):
         os.makedirs('./results')
 
