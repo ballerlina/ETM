@@ -150,10 +150,11 @@ if not os.path.exists(args.save_path):
 if args.mode == 'eval':
     ckpt = args.load_from
 else:
+    fixed_topics_str = '' if fixed_topics is None else '_' + args.fixed_topics.replace(',', '_')
     ckpt = os.path.join(args.save_path, 
-        'etm_{}_K_{}_Htheta_{}_Optim_{}_Clip_{}_ThetaAct_{}_Lr_{}_Bsz_{}_RhoSize_{}_trainEmbeddings_{}'.format(
+        'etm_{}_K_{}_Htheta_{}_Optim_{}_Clip_{}_ThetaAct_{}_Lr_{}_Bsz_{}_RhoSize_{}_trainEmbeddings_{}{}'.format(
         args.dataset, args.num_topics, args.t_hidden_size, args.optimizer, args.clip, args.theta_act, 
-            args.lr, args.batch_size, args.rho_size, args.train_embeddings))
+            args.lr, args.batch_size, args.rho_size, args.train_embeddings, fixed_topics_str))
 
 ## define model and optimizer
 model = ETM(args.num_topics, vocab_size, args.t_hidden_size, args.rho_size, args.emb_size, 
