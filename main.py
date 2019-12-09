@@ -4,13 +4,13 @@ from __future__ import print_function
 
 import argparse
 import torch
-import pickle 
-import numpy as np 
-import os 
-import math 
-import random 
+import pickle
+import numpy as np
+import os
+import math
+import random
 import sys
-import matplotlib.pyplot as plt 
+import matplotlib.pyplot as plt
 import data
 import scipy.io
 
@@ -38,7 +38,8 @@ parser.add_argument('--emb_size', type=int, default=300, help='dimension of embe
 parser.add_argument('--t_hidden_size', type=int, default=800, help='dimension of hidden space of q(theta)')
 parser.add_argument('--theta_act', type=str, default='relu', help='tanh, softplus, relu, rrelu, leakyrelu, elu, selu, glu)')
 parser.add_argument('--train_embeddings', type=int, default=0, help='whether to fix rho or train it')
-parser.add_argument('--fixed_topics', type=str, default=None, help='comma-separated list of words to fix as topic embs')
+parser.add_argument('--seeds', type=str, default=None, help='comma-separated list of seed words (one per topic)')
+parser.add_argument('--seeds_lambda', type=float, default=0., help='regularization coefficient for seeded topic priors (0 to fix the topic embedding)')
 
 ### optimization-related arguments
 parser.add_argument('--lr', type=float, default=0.005, help='learning rate')
@@ -104,7 +105,7 @@ embeddings = None
 if not args.train_embeddings:
     print('Loading embeddings...')
     emb_path = args.emb_path
-    vect_path = os.path.join(args.data_path.split('/')[0], 'embeddings.pkl')   
+    vect_path = os.path.join(args.data_path.split('/')[0], 'embeddings.pkl')
     if args.emb_gensim:
         vectors = KeyedVectors.load(args.emb_path)
     else:
@@ -119,7 +120,7 @@ if not args.train_embeddings:
     embeddings = np.zeros((vocab_size, args.emb_size))
     words_found = 0
     for i, word in enumerate(vocab):
-        try: 
+        try:
             embeddings[i] = vectors[word]
             words_found += 1
         except KeyError:
@@ -127,17 +128,18 @@ if not args.train_embeddings:
     embeddings = torch.from_numpy(embeddings).to(device)
     args.embeddings_dim = embeddings.size()
 
-if args.fixed_topics is not None:
+if args.seeds is not None:
     if args.train_embeddings:
-        print("We can't have fixed_topics while training embeddings")
+        print("We can't have seeds while training embeddings")
         exit(1)
-    fixed_topics = [vectors[word] for word in args.fixed_topics.split(',')]
+    seeds = [vectors[word] for word in args.seeds.split(',')]  # N x D array
 
-    if len(fixed_topics) > args.num_topics:
-        print('Number of fixed topics larger than total number of topics')
+    if len(seeds) > args.num_topics:
+        print('Number of seeded topics larger than total number of topics')
         exit(1)
 else:
-    fixed_topics = None
+    seeds = None
+    args.seeds_lambda = 0.
 
 print('=*'*100)
 print('Training an Embedded Topic Model on {} with the following settings: {}'.format(args.dataset.upper(), args))
@@ -150,15 +152,15 @@ if not os.path.exists(args.save_path):
 if args.mode == 'eval':
     ckpt = args.load_from
 else:
-    fixed_topics_str = '' if fixed_topics is None else '_' + args.fixed_topics.replace(',', '_')
-    ckpt = os.path.join(args.save_path, 
-        'etm_{}_K_{}_Htheta_{}_Optim_{}_Clip_{}_ThetaAct_{}_Lr_{}_Bsz_{}_RhoSize_{}_trainEmbeddings_{}{}'.format(
-        args.dataset, args.num_topics, args.t_hidden_size, args.optimizer, args.clip, args.theta_act, 
-            args.lr, args.batch_size, args.rho_size, args.train_embeddings, fixed_topics_str))
+    seeds_str = '' if seeds is None else '_' + args.seeds.replace(',', '_')
+    ckpt = os.path.join(args.save_path,
+                        'etm_{}_K_{}_Htheta_{}_Optim_{}_Clip_{}_ThetaAct_{}_Lr_{}_Bsz_{}_RhoSize_{}_trainEmbeddings_{}{}'.format(
+                            args.dataset, args.num_topics, args.t_hidden_size, args.optimizer, args.clip, args.theta_act,
+                            args.lr, args.batch_size, args.rho_size, args.train_embeddings, seeds_str))
 
 ## define model and optimizer
-model = ETM(args.num_topics, vocab_size, args.t_hidden_size, args.rho_size, args.emb_size, 
-                args.theta_act, embeddings, args.train_embeddings, args.enc_drop, fixed_topics).to(device)
+model = ETM(args.num_topics, vocab_size, args.t_hidden_size, args.rho_size, args.emb_size,
+            args.theta_act, embeddings, args.train_embeddings, args.enc_drop, seeds, args.seeds_lambda).to(device)
 
 print('model: {}'.format(model))
 
@@ -180,6 +182,7 @@ def train(epoch):
     model.train()
     acc_loss = 0
     acc_kl_theta_loss = 0
+    acc_alpha_prior_loss = 0
     cnt = 0
     indices = torch.randperm(args.num_docs_train)
     indices = torch.split(indices, args.batch_size)
@@ -192,8 +195,8 @@ def train(epoch):
             normalized_data_batch = data_batch / sums
         else:
             normalized_data_batch = data_batch
-        recon_loss, kld_theta = model(data_batch, normalized_data_batch)
-        total_loss = recon_loss + kld_theta
+        recon_loss, kld_theta, alpha_prior_loss = model(data_batch, normalized_data_batch)
+        total_loss = recon_loss + kld_theta + alpha_prior_loss
         total_loss.backward()
 
         if args.clip > 0:
@@ -202,22 +205,25 @@ def train(epoch):
 
         acc_loss += torch.sum(recon_loss).item()
         acc_kl_theta_loss += torch.sum(kld_theta).item()
+        acc_alpha_prior_loss += torch.sum(alpha_prior_loss).item()
         cnt += 1
 
         if idx % args.log_interval == 0 and idx > 0:
-            cur_loss = round(acc_loss / cnt, 2) 
-            cur_kl_theta = round(acc_kl_theta_loss / cnt, 2) 
+            cur_loss = round(acc_loss / cnt, 2)
+            cur_kl_theta = round(acc_kl_theta_loss / cnt, 2)
+            cur_alpha_prior_loss = round(acc_alpha_prior_loss / cnt, 2)
             cur_real_loss = round(cur_loss + cur_kl_theta, 2)
 
-            print('Epoch: {} .. batch: {}/{} .. LR: {} .. KL_theta: {} .. Rec_loss: {} .. NELBO: {}'.format(
-                epoch, idx, len(indices), optimizer.param_groups[0]['lr'], cur_kl_theta, cur_loss, cur_real_loss))
-    
-    cur_loss = round(acc_loss / cnt, 2) 
-    cur_kl_theta = round(acc_kl_theta_loss / cnt, 2) 
-    cur_real_loss = round(cur_loss + cur_kl_theta, 2)
+            print('Epoch: {} .. batch: {}/{} .. LR: {} .. KL_theta: {} .. Rec_loss: {} .. AP_loss: {} .. NELBO: {}'.format(
+                epoch, idx, len(indices), optimizer.param_groups[0]['lr'], cur_kl_theta, cur_loss, cur_alpha_prior_loss, cur_real_loss))
+
+    cur_loss = round(acc_loss / cnt, 2)
+    cur_kl_theta = round(acc_kl_theta_loss / cnt, 2)
+    cur_alpha_prior_loss = round(acc_alpha_prior_loss / cnt, 2)
+    cur_real_loss = round(cur_loss + cur_kl_theta + cur_alpha_prior_loss, 2)
     print('*'*100)
-    print('Epoch----->{} .. LR: {} .. KL_theta: {} .. Rec_loss: {} .. NELBO: {}'.format(
-            epoch, optimizer.param_groups[0]['lr'], cur_kl_theta, cur_loss, cur_real_loss))
+    print('Epoch----->{} .. LR: {} .. KL_theta: {} .. Rec_loss: {} .. AP_loss: {} .. NELBO: {}'.format(
+        epoch, optimizer.param_groups[0]['lr'], cur_kl_theta, cur_loss, cur_alpha_prior_loss, cur_real_loss))
     print('*'*100)
 
 def visualize(m, show_emb=False):
@@ -226,8 +232,8 @@ def visualize(m, show_emb=False):
 
     m.eval()
 
-    queries = ['andrew', 'computer', 'sports', 'religion', 'man', 'love', 
-                'intelligence', 'money', 'politics', 'health', 'people', 'family']
+    queries = ['andrew', 'computer', 'sports', 'religion', 'man', 'love',
+               'intelligence', 'money', 'politics', 'health', 'people', 'family']
 
     ## visualize topics using monte carlo
     with torch.no_grad():
@@ -265,7 +271,7 @@ def evaluate(m, source, tc=False, td=False):
             indices = torch.split(torch.tensor(range(args.num_docs_valid)), args.eval_batch_size)
             tokens = valid_tokens
             counts = valid_counts
-        else: 
+        else:
             indices = torch.split(torch.tensor(range(args.num_docs_test)), args.eval_batch_size)
             tokens = test_tokens
             counts = test_counts
@@ -293,7 +299,7 @@ def evaluate(m, source, tc=False, td=False):
             res = torch.mm(theta, beta)
             preds = torch.log(res)
             recon_loss = -(preds * data_batch_2).sum(1)
-            
+
             loss = recon_loss / sums_2.squeeze()
             loss = loss.mean().item()
             acc_loss += loss
@@ -342,7 +348,7 @@ if args.mode == 'train':
         model = torch.load(f)
     model = model.to(device)
     val_ppl = evaluate(model, 'val')
-else:   
+else:
     with open(ckpt, 'rb') as f:
         model = torch.load(f)
     model = model.to(device)
@@ -391,8 +397,8 @@ else:
                 rho_etm = model.rho.weight.cpu()
             except:
                 rho_etm = model.rho.cpu()
-            queries = ['andrew', 'woman', 'computer', 'sports', 'religion', 'man', 'love', 
-                            'intelligence', 'money', 'politics', 'health', 'people', 'family']
+            queries = ['andrew', 'woman', 'computer', 'sports', 'religion', 'man', 'love',
+                       'intelligence', 'money', 'politics', 'health', 'people', 'family']
             print('\n')
             print('ETM embeddings...')
             for word in queries:

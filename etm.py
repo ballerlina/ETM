@@ -11,18 +11,20 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class ETM(nn.Module):
     def __init__(self, num_topics, vocab_size, t_hidden_size, rho_size, emsize, 
                     theta_act, embeddings=None, train_embeddings=True, enc_drop=0.5,
-                    fixed_topics=None):
+                    seeds=None, seeds_lambda=0.):
         super(ETM, self).__init__()
 
         ## define hyperparameters
         self.num_topics = num_topics
-        self.num_fixed_topics = 0 if fixed_topics is None else len(fixed_topics)
+        self.num_seeded_topics = 0 if seeds is None else len(seeds)
         self.vocab_size = vocab_size
         self.t_hidden_size = t_hidden_size
         self.rho_size = rho_size
         self.enc_drop = enc_drop
         self.emsize = emsize
         self.t_drop = nn.Dropout(enc_drop)
+        self.seeds = seeds
+        self.seeds_lambda = seeds_lambda
 
         self.theta_act = self.get_activation(theta_act)
         
@@ -35,12 +37,12 @@ class ETM(nn.Module):
             self.rho = embeddings.clone().float().to(device)
 
         ## define the matrix containing the topic embeddings
-        self.alphas = nn.Linear(rho_size, num_topics - self.num_fixed_topics, bias=False)#nn.Parameter(torch.randn(rho_size, num_topics))
+        self.alphas = nn.Linear(rho_size, num_topics - self.num_seeded_topics, bias=False)#nn.Parameter(torch.randn(rho_size, num_topics))
 
-        if self.num_fixed_topics > 0:
-            self.alphas_fixed = nn.Linear(rho_size, self.num_fixed_topics, bias=False)
-            for i, vector in enumerate(fixed_topics):
-                self.alphas_fixed.weight.data[i, :] = torch.as_tensor(vector)
+        if self.num_seeded_topics > 0:
+            self.alphas_seeded = nn.Linear(rho_size, self.num_seeded_topics, bias=False)
+            if self.seeds_lambda == 0.:
+                self.alphas_seeded.weight.data = torch.as_tensor(self.seeds)
 
         ## define variational distribution for \theta_{1:D} via amortizartion
         self.q_theta = nn.Sequential(
@@ -100,8 +102,12 @@ class ETM(nn.Module):
         return mu_theta, logsigma_theta, kl_theta
 
     def get_beta(self):
-        alphas = self.alphas.weight if self.num_fixed_topics == 0 \
-            else torch.cat([self.alphas.weight, self.alphas_fixed.weight.detach()])
+        if self.num_seeded_topics == 0:
+            alphas = self.alphas.weight
+        else:
+            alphas_seeded_weight = self.alphas_seeded.weight if self.seeds_lambda > 0\
+                              else self.alphas_seeded.weight.detach()
+            alphas = torch.cat([self.alphas.weight, alphas_seeded_weight])
         alphas = alphas.transpose(1, 0)
         try:
             logit = torch.mm(self.rho.weight, alphas)
@@ -115,6 +121,10 @@ class ETM(nn.Module):
         z = self.reparameterize(mu_theta, logsigma_theta)
         theta = F.softmax(z, dim=-1) 
         return theta, kld_theta
+
+    def get_alpha_prior(self):
+        return torch.mul(self.seeds_lambda,
+                         torch.sum(torch.pow(self.alphas_seeded.weight - torch.as_tensor(self.seeds), 2)))
 
     def decode(self, theta, beta):
         res = torch.mm(theta, beta)
@@ -136,5 +146,7 @@ class ETM(nn.Module):
         recon_loss = -(preds * bows).sum(1)
         if aggregate:
             recon_loss = recon_loss.mean()
-        return recon_loss, kld_theta
 
+        alpha_prior_loss = self.get_alpha_prior() if self.seeds_lambda > 0 else torch.zeros(1)
+
+        return recon_loss, kld_theta, alpha_prior_loss
