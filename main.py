@@ -152,7 +152,7 @@ if not os.path.exists(args.save_path):
 if args.mode == 'eval':
     ckpt = args.load_from
 else:
-    seeds_str = '' if seeds is None else '_' + args.seeds.replace(',', '_')
+    seeds_str = '' if seeds is None else '_' + args.seeds.replace(',', '_') + '_SeedLd_' + str(round(args.seeds_lambda, 2))
     ckpt = os.path.join(args.save_path,
                         'etm_{}_K_{}_Htheta_{}_Optim_{}_Clip_{}_ThetaAct_{}_Lr_{}_Bsz_{}_RhoSize_{}_trainEmbeddings_{}{}'.format(
                             args.dataset, args.num_topics, args.t_hidden_size, args.optimizer, args.clip, args.theta_act,
